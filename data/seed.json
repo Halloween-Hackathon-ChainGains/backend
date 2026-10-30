@@ -1,0 +1,10 @@
+[
+  {"id":"s1","name":"Priya","has":["Stewart Calculus 8th ed"],"wants":["27 inch monitor"],"createdAt":0},
+  {"id":"s2","name":"Marcus","has":["Dell 27in display"],"wants":["mini fridge for dorm"],"createdAt":0},
+  {"id":"s3","name":"Lena","has":["compact fridge, barely used"],"wants":["calc textbook"],"createdAt":0},
+  {"id":"s4","name":"Diego","has":["Jan sublet near Washington Sq"],"wants":["bike"],"createdAt":0},
+  {"id":"s5","name":"Aisha","has":["road bike"],"wants":["noise cancelling headphones"],"createdAt":0},
+  {"id":"s6","name":"Tom","has":["Sony WH-1000XM4"],"wants":["standing desk"],"createdAt":0},
+  {"id":"s7","name":"Kim","has":["adjustable sit-stand desk"],"wants":["January sublet in Manhattan"],"createdAt":0},
+  {"id":"s8","name":"Sam","has":["PS5 controller"],"wants":["air fryer"],"createdAt":0}
+]

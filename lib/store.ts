@@ -1,11 +1,13 @@
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { Redis } from "@upstash/redis";
-import type { LoopsResponse, Person } from "./types";
+import type { Loop, LoopsResponse, Person } from "./types";
 
 export type Canon = { label: string; value: number };
 
-const memory = new Map<string, unknown>();
+// Next bundles each route separately; a global keeps one in-memory store across them.
+const shared = globalThis as typeof globalThis & { __loopMemory?: Map<string, unknown> };
+const memory = (shared.__loopMemory ??= new Map<string, unknown>());
 let redis: Redis | null | undefined;
 
 function loadDotEnv() {
@@ -122,34 +124,171 @@ export async function bumpVersion(): Promise<number> {
   return client.incr("version");
 }
 
+const LIVE_PREFIXES = ["loops:", "decisions:", "meeting:"];
+const LIVE_KEYS = ["people", "declined", "confirmed"];
+
 export async function resetLive(): Promise<void> {
   const version = await getVersion();
-  const keys = [`people`, `loops:${version}`];
+  const keys = [...LIVE_KEYS, `loops:${version}`];
   const client = getRedis();
   if (!client) {
     for (const key of [...memory.keys()]) {
-      if (key === "people" || key.startsWith("loops:")) memory.delete(key);
+      if (LIVE_KEYS.includes(key) || LIVE_PREFIXES.some((prefix) => key.startsWith(prefix))) memory.delete(key);
     }
   } else {
-    try {
-      const cached = await client.keys("loops:*");
-      keys.push(...cached);
-    } catch {
-      // Version bump still makes the previous cache unread.
+    for (const prefix of LIVE_PREFIXES) {
+      try {
+        keys.push(...(await client.keys(`${prefix}*`)));
+      } catch {
+        // Version bump still makes the previous cache unread.
+      }
     }
     await kvDel([...new Set(keys)]);
   }
   await bumpVersion();
 }
 
+export type Decision = "yes" | "no";
+export type Meeting = NonNullable<Loop["meeting"]>;
+
+export async function getDecisions(loopId: string): Promise<Record<string, Decision>> {
+  const key = `decisions:${loopId}`;
+  const client = getRedis();
+  const raw = client
+    ? await client.hgetall<Record<string, unknown>>(key)
+    : (memory.get(key) as Record<string, unknown> | undefined);
+  const out: Record<string, Decision> = {};
+  for (const [personId, value] of Object.entries(raw ?? {})) {
+    if (value === "yes" || value === "no") out[personId] = value;
+  }
+  return out;
+}
+
+export async function setDecision(loopId: string, personId: string, decision: Decision): Promise<void> {
+  const key = `decisions:${loopId}`;
+  const client = getRedis();
+  if (!client) {
+    const current = (memory.get(key) as Record<string, Decision> | undefined) ?? {};
+    memory.set(key, { ...current, [personId]: decision });
+    return;
+  }
+  await client.hset(key, { [personId]: decision });
+}
+
+export async function getDeclined(): Promise<Set<string>> {
+  const client = getRedis();
+  if (!client) return new Set((memory.get("declined") as string[] | undefined) ?? []);
+  const members = await client.smembers("declined");
+  return new Set(members.map(String));
+}
+
+export async function addDeclined(loopId: string): Promise<void> {
+  const client = getRedis();
+  if (!client) {
+    const current = (memory.get("declined") as string[] | undefined) ?? [];
+    if (!current.includes(loopId)) memory.set("declined", [...current, loopId]);
+    return;
+  }
+  await client.sadd("declined", loopId);
+}
+
+export async function getMeeting(loopId: string): Promise<Meeting | null> {
+  const value = await kvGet<Meeting>(`meeting:${loopId}`);
+  return value && typeof value.start === "string" ? value : null;
+}
+
+export async function getConfirmedLoops(): Promise<Loop[]> {
+  const client = getRedis();
+  const raw = client
+    ? await client.hgetall<Record<string, Loop>>("confirmed")
+    : (memory.get("confirmed") as Record<string, Loop> | undefined);
+  return Object.values(raw ?? {})
+    .filter((loop) => loop && typeof loop.id === "string" && Array.isArray(loop.people) && Array.isArray(loop.trades))
+    .map((loop) => ({ ...loop }));
+}
+
+export async function getConfirmedLoop(loopId: string): Promise<Loop | null> {
+  const client = getRedis();
+  if (!client) {
+    const all = (memory.get("confirmed") as Record<string, Loop> | undefined) ?? {};
+    return all[loopId] ?? null;
+  }
+  return (await client.hget<Loop>("confirmed", loopId)) ?? null;
+}
+
+export async function saveConfirmed(loop: Loop, meeting: Meeting): Promise<void> {
+  const snapshot: Loop = {
+    id: loop.id,
+    people: loop.people,
+    trades: loop.trades,
+    message: loop.message,
+    totalValue: loop.totalValue,
+  };
+  await kvSet(`meeting:${loop.id}`, meeting);
+  const client = getRedis();
+  if (!client) {
+    const current = (memory.get("confirmed") as Record<string, Loop> | undefined) ?? {};
+    memory.set("confirmed", { ...current, [loop.id]: snapshot });
+    return;
+  }
+  await client.hset("confirmed", { [loop.id]: snapshot });
+}
+
 function canonKey(item: string): string {
   return `canon:${item.trim().toLowerCase()}`;
 }
 
+function readCanonSeed(): Record<string, Canon> {
+  try {
+    const raw = readFileSync(path.join(process.cwd(), "data", "canon-seed.json"), "utf8");
+    const parsed = JSON.parse(raw) as Record<string, Canon>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+const canonSeed = readCanonSeed();
+const canonSeedByKey = new Map<string, Canon>();
+for (const [item, canon] of Object.entries(canonSeed)) {
+  if (!canon || typeof canon.label !== "string" || typeof canon.value !== "number") continue;
+  canonSeedByKey.set(item.trim().toLowerCase(), { label: canon.label, value: canon.value });
+}
+
+function seededCanon(item: string): Canon | null {
+  return canonSeedByKey.get(item.trim().toLowerCase()) ?? null;
+}
+
+let preloadTask: Promise<void> | null = null;
+
+export function preloadCanon(): Promise<void> {
+  if (!preloadTask) {
+    preloadTask = (async () => {
+      for (const [item, canon] of canonSeedByKey) {
+        try {
+          await setCanon(item, canon);
+        } catch {
+          // Seed lookups still succeed from canon-seed.json.
+        }
+      }
+    })();
+  }
+  return preloadTask;
+}
+
+void preloadCanon();
+
 export async function getCanon(item: string): Promise<Canon | null> {
-  const value = await kvGet<Canon>(canonKey(item));
-  if (!value || typeof value.label !== "string" || typeof value.value !== "number") return null;
-  return value;
+  const seeded = seededCanon(item);
+  if (seeded) return seeded;
+  try {
+    const value = await kvGet<Canon>(canonKey(item));
+    if (!value || typeof value.label !== "string" || typeof value.value !== "number") return null;
+    return value;
+  } catch {
+    return null;
+  }
 }
 
 export async function setCanon(item: string, canon: Canon): Promise<void> {

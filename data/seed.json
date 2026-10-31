@@ -6,5 +6,17 @@
   {"id":"s5","name":"Aisha","has":["road bike"],"wants":["noise cancelling headphones"],"createdAt":0},
   {"id":"s6","name":"Tom","has":["Sony WH-1000XM4"],"wants":["standing desk"],"createdAt":0},
   {"id":"s7","name":"Kim","has":["adjustable sit-stand desk"],"wants":["January sublet in Manhattan"],"createdAt":0},
-  {"id":"s8","name":"Sam","has":["PS5 controller"],"wants":["air fryer"],"createdAt":0}
+  {"id":"s8","name":"Sam","has":["PS5 controller"],"wants":["air fryer"],"createdAt":0},
+  {"id":"s9","name":"Jordan","has":["Canon AE-1 film camera"],"wants":["iPad"],"createdAt":0},
+  {"id":"s10","name":"Mei","has":["iPad Air 4th gen w/ pencil"],"wants":["guitar"],"createdAt":0},
+  {"id":"s11","name":"Arjun","has":["Yamaha acoustic guitar"],"wants":["espresso machine"],"createdAt":0},
+  {"id":"s12","name":"Sofia","has":["Breville Bambino espresso maker"],"wants":["35mm camera"],"createdAt":0},
+  {"id":"s13","name":"Noah","has":["TI-84 Plus CE"],"wants":["winter coat"],"createdAt":0},
+  {"id":"s14","name":"Hana","has":["North Face puffer, size M"],"wants":["office chair"],"createdAt":0},
+  {"id":"s15","name":"Leo","has":["ergonomic desk chair"],"wants":["graphing calculator"],"createdAt":0},
+  {"id":"s16","name":"Ravi","has":["Zojirushi rice cooker"],"wants":["mechanical keyboard"],"createdAt":0},
+  {"id":"s17","name":"Chloe","has":["Keychron K2 mech kb"],"wants":["rice cooker"],"createdAt":0},
+  {"id":"s18","name":"Emma","has":["Panasonic microwave"],"wants":["DualSense controller"],"createdAt":0},
+  {"id":"s19","name":"Zara","has":["Lululemon yoga mat"],"wants":["board games"],"createdAt":0},
+  {"id":"s20","name":"Ben","has":["LED desk lamp"],"wants":["winter boots"],"createdAt":0}
 ]

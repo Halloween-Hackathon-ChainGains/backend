@@ -1,15 +1,24 @@
 import { findLoops } from "./cycles";
 import { grokJSON } from "./grok";
+import { createMeeting } from "./meeting";
 import {
   getCachedLoops,
   getCanon,
+  getConfirmedLoops,
+  getDecisions,
+  getDeclined,
   getLoopMessage,
+  getMeeting,
   getPeople,
   getVersion,
+  preloadCanon,
+  saveConfirmed,
   setCachedLoops,
   setCanon,
   setLoopMessage,
   type Canon,
+  type Decision,
+  type Meeting,
 } from "./store";
 import type { Loop, LoopsResponse, Person, Trade } from "./types";
 
@@ -30,6 +39,7 @@ Example shape: "Priya gives Marcus the calc book, Marcus gives Lena the monitor,
 One sentence per loop. No line breaks.`;
 
 export async function canonicalize(items: string[]): Promise<{ canon: Map<string, Canon>; usedFallback: boolean }> {
+  await preloadCanon();
   const unique = [...new Set(items.map((item) => item.trim()).filter(Boolean))];
   const canon = new Map<string, Canon>();
   const uncached: string[] = [];
@@ -76,7 +86,7 @@ export async function canonicalize(items: string[]): Promise<{ canon: Map<string
       }
     } else {
       usedFallback = true;
-      canon.set(item, { label: item.trim().toLowerCase(), value: 20 });
+      canon.set(item, { label: plainLabel(item), value: 20 });
     }
   }
 
@@ -94,7 +104,7 @@ export function buildEdges(people: Person[], canon: Map<string, Canon>): Trade[]
         if (!offered) continue;
         for (const wantItem of receiver.wants) {
           const wanted = lookup(canon, wantItem);
-          if (!wanted || offered.label !== wanted.label) continue;
+          if (!wanted || !labelsMatch(offered.label, wanted.label)) continue;
           if (!best || offered.value > best.value) {
             best = { from: giver.id, to: receiver.id, item: hasItem, value: offered.value };
           }
@@ -106,7 +116,20 @@ export function buildEdges(people: Person[], canon: Map<string, Canon>): Trade[]
   return edges;
 }
 
-export function selectDeals(people: Person[], edges: Trade[]): Loop[] {
+export function selectDeals(
+  people: Person[],
+  edges: Trade[],
+  options: { pinned?: Loop[]; declined?: Set<string> } = {},
+): Loop[] {
+  const present = new Set(people.map((person) => person.id));
+  const used = new Set<string>();
+  const picked: Loop[] = [];
+  for (const loop of options.pinned ?? []) {
+    if (loop.people.some((id) => !present.has(id) || used.has(id))) continue;
+    for (const id of loop.people) used.add(id);
+    picked.push(loop);
+  }
+
   const index = new Map(people.map((person, i) => [person.id, i]));
   const adj: number[][] = people.map(() => []);
   const edgeByPair = new Map<string, Trade>();
@@ -140,10 +163,9 @@ export function selectDeals(people: Person[], edges: Trade[]): Loop[] {
 
   found.sort((a, b) => b.people.length - a.people.length || b.totalValue - a.totalValue);
 
-  const used = new Set<string>();
-  const picked: Loop[] = [];
   for (const loop of found) {
     if (loop.trades.length !== loop.people.length) continue;
+    if (options.declined?.has(loop.id)) continue;
     if (loop.people.some((id) => used.has(id))) continue;
     for (const id of loop.people) used.add(id);
     picked.push(loop);
@@ -156,6 +178,7 @@ export async function fillMessages(loops: Loop[], people: Person[]): Promise<voi
   const missing: Loop[] = [];
 
   for (const loop of loops) {
+    if (loop.message) continue;
     let cached: string | null = null;
     try {
       cached = await getLoopMessage(loop.id);
@@ -208,8 +231,14 @@ export async function computeLoops(): Promise<{ body: LoopsResponse; complete: b
   const items = people.flatMap((person) => [...person.has, ...person.wants]);
   const { canon, usedFallback } = await canonicalize(items);
   const edges = buildEdges(people, canon);
-  const loops = selectDeals(people, edges);
+  const [pinned, declined] = await Promise.all([getConfirmedLoops(), getDeclined()]);
+  const pinnedIds = new Set(pinned.map((loop) => loop.id));
+  const loops = selectDeals(people, edges, { pinned, declined });
   await fillMessages(loops, people);
+  for (const loop of loops) {
+    if (pinnedIds.has(loop.id)) await markConfirmed(loop);
+    else await settleLoop(loop, people);
+  }
   const body: LoopsResponse = {
     people,
     edges,
@@ -221,6 +250,50 @@ export async function computeLoops(): Promise<{ body: LoopsResponse; complete: b
     },
   };
   return { body, complete: !usedFallback };
+}
+
+export function isSeedPerson(id: string): boolean {
+  return id.startsWith("s");
+}
+
+export function withSeedDecisions(loop: Loop, stored: Record<string, Decision>): Record<string, Decision> {
+  const decisions: Record<string, Decision> = {};
+  for (const id of loop.people) {
+    const decision = stored[id] ?? (isSeedPerson(id) ? "yes" : undefined);
+    if (decision) decisions[id] = decision;
+  }
+  return decisions;
+}
+
+export function allAccepted(loop: Loop, decisions: Record<string, Decision>): boolean {
+  return loop.people.every((id) => decisions[id] === "yes");
+}
+
+export async function confirmLoop(loop: Loop, people: Person[]): Promise<Meeting> {
+  const existing = await getMeeting(loop.id);
+  const meeting = existing ?? createMeeting(loop, people);
+  if (!existing) await saveConfirmed(loop, meeting);
+  loop.status = "confirmed";
+  loop.decisions = Object.fromEntries(loop.people.map((id) => [id, "yes" as const]));
+  loop.meeting = meeting;
+  return meeting;
+}
+
+async function markConfirmed(loop: Loop): Promise<void> {
+  loop.status = "confirmed";
+  loop.decisions = Object.fromEntries(loop.people.map((id) => [id, "yes" as const]));
+  const meeting = await getMeeting(loop.id);
+  if (meeting) loop.meeting = meeting;
+}
+
+async function settleLoop(loop: Loop, people: Person[]): Promise<void> {
+  const decisions = withSeedDecisions(loop, await getDecisions(loop.id));
+  if (allAccepted(loop, decisions)) {
+    await confirmLoop(loop, people);
+    return;
+  }
+  loop.status = "pending";
+  loop.decisions = decisions;
 }
 
 const inflight = new Map<number, Promise<LoopsResponse>>();
@@ -256,6 +329,21 @@ export async function getLoops(): Promise<LoopsResponse> {
 
 function lookup(canon: Map<string, Canon>, item: string): Canon | undefined {
   return canon.get(item) ?? canon.get(item.trim());
+}
+
+function plainLabel(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function labelsMatch(a: string, b: string): boolean {
+  const left = plainLabel(a);
+  const right = plainLabel(b);
+  if (!left || !right) return false;
+  return left === right || left.includes(right) || right.includes(left);
 }
 
 function asCanon(value: unknown, item: string): { canon: Canon; fromModel: boolean } {
@@ -320,9 +408,29 @@ function templateMessage(loop: Loop, names: Map<string, string>): string {
   const parts = loop.trades.map((trade) => {
     const from = names.get(trade.from) ?? trade.from;
     const to = names.get(trade.to) ?? trade.to;
-    return `${from} gives ${to} the ${trade.item}`;
+    return `${from} gives ${to} the ${spokenItem(trade.item)}`;
   });
   if (parts.length === 0) return "A trade loop is ready.";
   const sentence = parts.join(", ");
   return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
+}
+
+function spokenItem(item: string): string {
+  const cleaned = item.split(",")[0].trim().replace(/\s+/g, " ").replace(/\bw\//gi, "with");
+  const words = cleaned.split(" ").filter(Boolean);
+  const start = words.findIndex((word) => /^[a-z]/.test(word));
+  if (start < 0) return cleaned;
+  let phrase = words.slice(start);
+  const short = (word: string) => word.replace(/[^a-z0-9]/gi, "").length <= 2;
+  if (phrase.some(short)) return cleaned;
+  if (phrase.length === 1 && start > 0 && /\d/.test(words[start - 1])) {
+    phrase = [words[start - 1], ...phrase];
+  }
+  if (phrase.length === 1 && phrase[0].length < 8 && start > 0) {
+    let brand = start - 1;
+    while (brand > 0 && /^[A-Z]/.test(words[brand - 1])) brand -= 1;
+    phrase = [...words.slice(brand, start), ...phrase];
+  }
+  const text = phrase.join(" ");
+  return text.length >= 3 ? text : cleaned;
 }
